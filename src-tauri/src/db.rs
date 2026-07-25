@@ -3,6 +3,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
+    thread,
     time::Duration,
 };
 
@@ -34,7 +35,7 @@ pub struct OutboxEntry {
 
 #[derive(Clone)]
 pub struct Database {
-    connection: Arc<Mutex<Connection>>,
+    connection: Arc<Mutex<Option<Connection>>>,
     path: Arc<PathBuf>,
 }
 
@@ -44,13 +45,7 @@ impl Database {
             fs::create_dir_all(parent)?;
         }
 
-        let mut connection = Connection::open(&path)?;
-        connection.busy_timeout(Duration::from_secs(5))?;
-        connection.pragma_update(None, "journal_mode", "WAL")?;
-        connection.pragma_update(None, "synchronous", "FULL")?;
-        connection.pragma_update(None, "foreign_keys", "ON")?;
-        connection.pragma_update(None, "secure_delete", "ON")?;
-        connection.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
+        let mut connection = open_connection(&path)?;
 
         migrate(&mut connection)?;
         connection.execute(
@@ -60,7 +55,7 @@ impl Database {
         )?;
 
         Ok(Self {
-            connection: Arc::new(Mutex::new(connection)),
+            connection: Arc::new(Mutex::new(Some(connection))),
             path: Arc::new(path),
         })
     }
@@ -720,48 +715,32 @@ impl Database {
         })
     }
 
-    pub fn complete_submit(
+    pub fn recreate_with_state(
         &self,
         config: &ClientConfig,
         snapshot: &ClientSnapshot,
-        compilation_id: &str,
     ) -> Result<(), AppError> {
-        let config_json = serde_json::to_string(config)?;
-        let snapshot_json = serde_json::to_string(snapshot)?;
-        let timestamp = now();
+        let mut guard = self.connection.lock().map_err(|_| {
+            AppError::Storage("mutex SQLite avvelenato".to_string())
+        })?;
 
-        self.with_connection(|connection| {
-            let transaction = connection.transaction()?;
-            transaction.execute(
-                "INSERT INTO client_state
-                    (id, config_json, snapshot_json, updated_at)
-                 VALUES (1, ?1, ?2, ?3)
-                 ON CONFLICT(id) DO UPDATE SET
-                    config_json = excluded.config_json,
-                    snapshot_json = excluded.snapshot_json,
-                    updated_at = excluded.updated_at",
-                params![config_json, snapshot_json, timestamp],
-            )?;
-            transaction.execute(
-                "DELETE FROM outbox WHERE compilation_id = ?1",
-                [compilation_id],
-            )?;
-            transaction.execute(
-                "DELETE FROM local_answer WHERE compilation_id = ?1",
-                [compilation_id],
-            )?;
-            transaction.execute(
-                "DELETE FROM questionnaire_cache WHERE compilation_id = ?1",
-                [compilation_id],
-            )?;
-            transaction.commit()?;
+        if let Some(connection) = guard.as_mut() {
+            connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        }
 
-            connection.execute_batch(
-                "PRAGMA wal_checkpoint(TRUNCATE);
-                 PRAGMA incremental_vacuum;",
-            )?;
-            Ok(())
-        })
+        // Su Windows il file non può essere rimosso finché esiste anche una
+        // sola handle aperta. take() trasferisce la Connection fuori dal
+        // mutex e drop() chiude esplicitamente tutte le handle SQLite.
+        let connection = guard.take();
+        drop(connection);
+
+        remove_database_files(self.path())?;
+
+        let mut connection = open_connection(self.path())?;
+        migrate(&mut connection)?;
+        save_state_on_connection(&mut connection, config, snapshot)?;
+        *guard = Some(connection);
+        Ok(())
     }
 
     fn with_connection<T>(
@@ -771,8 +750,75 @@ impl Database {
         let mut guard = self.connection.lock().map_err(|_| {
             AppError::Storage("mutex SQLite avvelenato".to_string())
         })?;
-        operation(&mut guard)
+        let connection = guard.as_mut().ok_or_else(|| {
+            AppError::Storage("connessione SQLite non disponibile".to_string())
+        })?;
+        operation(connection)
     }
+}
+
+fn open_connection(path: &Path) -> Result<Connection, AppError> {
+    let connection = Connection::open(path)?;
+    connection.busy_timeout(Duration::from_secs(5))?;
+    connection.pragma_update(None, "journal_mode", "WAL")?;
+    connection.pragma_update(None, "synchronous", "FULL")?;
+    connection.pragma_update(None, "foreign_keys", "ON")?;
+    connection.pragma_update(None, "secure_delete", "ON")?;
+    connection.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
+    Ok(connection)
+}
+
+fn save_state_on_connection(
+    connection: &mut Connection,
+    config: &ClientConfig,
+    snapshot: &ClientSnapshot,
+) -> Result<(), AppError> {
+    connection.execute(
+        "INSERT INTO client_state
+            (id, config_json, snapshot_json, updated_at)
+         VALUES (1, ?1, ?2, ?3)
+         ON CONFLICT(id) DO UPDATE SET
+            config_json = excluded.config_json,
+            snapshot_json = excluded.snapshot_json,
+            updated_at = excluded.updated_at",
+        params![
+            serde_json::to_string(config)?,
+            serde_json::to_string(snapshot)?,
+            now(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn remove_database_files(path: &Path) -> Result<(), AppError> {
+    let mut paths = vec![path.to_path_buf()];
+    paths.push(PathBuf::from(format!("{}-wal", path.display())));
+    paths.push(PathBuf::from(format!("{}-shm", path.display())));
+
+    for candidate in paths {
+        remove_file_with_retry(&candidate)?;
+    }
+    Ok(())
+}
+
+fn remove_file_with_retry(path: &Path) -> Result<(), AppError> {
+    const ATTEMPTS: usize = 10;
+
+    for attempt in 0..ATTEMPTS {
+        match fs::remove_file(path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(())
+            }
+            Err(error) if attempt + 1 < ATTEMPTS => {
+                let _ = error;
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    Ok(())
 }
 
 fn migrate(connection: &mut Connection) -> Result<(), AppError> {

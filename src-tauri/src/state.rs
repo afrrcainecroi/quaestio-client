@@ -5,6 +5,7 @@ use std::{
     sync::Arc,
 };
 
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 use futures_util::stream::SplitSink;
 use tokio::{net::TcpStream, sync::{oneshot, Mutex, RwLock}};
@@ -65,6 +66,11 @@ impl AppState {
                     "stato SQLite assente dopo l'inizializzazione".to_string(),
                 )
             })?;
+
+        if attempt_is_expired(&snapshot) {
+            snapshot = ClientSnapshot::from_config(&config);
+            database.recreate_with_state(&config, &snapshot)?;
+        }
 
         snapshot.websocket_connected = false;
         if matches!(
@@ -161,4 +167,16 @@ fn read_default_token() -> Option<String> {
     let value = fs::read_to_string(path).ok()?;
     let token = value.trim().to_string();
     (!token.is_empty()).then_some(token)
+}
+
+fn attempt_is_expired(snapshot: &ClientSnapshot) -> bool {
+    if snapshot.state == ClientState::Submitted {
+        return false;
+    }
+
+    snapshot
+        .expires_at
+        .as_deref()
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .is_some_and(|expires_at| expires_at.with_timezone(&Utc) <= Utc::now())
 }

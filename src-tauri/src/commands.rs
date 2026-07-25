@@ -493,11 +493,7 @@ pub async fn submit_attempt(
         snapshot.clone()
     };
     let config = state.config.read().await.clone();
-    state.db.complete_submit(
-        &config,
-        &snapshot,
-        &compilation_id,
-    )?;
+    state.db.recreate_with_state(&config, &snapshot)?;
     state.answers.write().await.clear();
     *state.access_token.write().await = None;
     websocket::disconnect(state.inner()).await?;
