@@ -1,5 +1,5 @@
 {
-  "name": "controlled-questionnaire-client",
+  "name": "quaestio-client",
   "private": true,
   "version": "0.7.6",
   "type": "module",
@@ -23,5 +23,13 @@
     "typescript": "^5.7.0",
     "vite": "^6.0.0"
   },
-  "allowScripts": {}
+  "allowScripts": {},
+  "description": "Client open source per il sistema di questionari controllati Quaestio",
+  "author": "Franco Arcieri",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/afrrcainecroi/quaestio-client.git"
+  },
+  "homepage": "https://github.com/afrrcainecroi/quaestio-client"
 }

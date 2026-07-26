@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Controlled Questionnaire",
+  "productName": "Quaestio Client",
   "version": "0.7.6",
-  "identifier": "it.arcieri.controlled-questionnaire",
+  "identifier": "it.arcieri.quaestio.client",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "MNGQUEST Controlled Questionnaire",
+        "title": "Quaestio Client",
         "width": 1000,
         "height": 760,
         "minWidth": 760,
@@ -31,7 +31,7 @@
       "nsis"
     ],
     "category": "Education",
-    "shortDescription": "Client controllato per questionari online",
+    "shortDescription": "Client open source per questionari controllati Quaestio",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -51,6 +51,9 @@
         ],
         "displayLanguageSelector": false
       }
-    }
+    },
+    "longDescription": "Strumento tecnico-didattico e di ricerca ideato e sviluppato da Franco Arcieri.",
+    "copyright": "Copyright © 2022–2026 Franco Arcieri",
+    "publisher": "Franco Arcieri"
   }
 }

@@ -1,8 +1,11 @@
 [package]
-name = "controlled-questionnaire-client"
+name = "quaestio-client"
 version = "0.7.6"
-description = "Client controllato per questionari online"
+description = "Client open source per il sistema di questionari controllati Quaestio"
 authors = ["Franco Arcieri"]
+license = "Apache-2.0"
+repository = "https://github.com/afrrcainecroi/quaestio-client"
+homepage = "https://github.com/afrrcainecroi/quaestio-client"
 edition = "2021"
 
 [lib]

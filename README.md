@@ -1,164 +1,138 @@
-# Controlled Questionnaire Client v0.7.6 — SQLite
+# Quaestio Client v0.7.6
 
-Client Tauri per `mngquest-dual-transport-v0.6.0-auth`.
+Client desktop open source del sistema **Quaestio**, destinato alla compilazione controllata di questionari tramite un server remoto.
 
-## Novità
+## Natura e finalità
 
-La persistenza JSON è stata sostituita da SQLite:
+Quaestio non costituisce un prodotto destinato alla vendita. È uno strumento di supporto tecnico-didattico e di ricerca, sviluppato e impiegato nell'ambito dell'attività professionale di consulenza e formazione ICT di Franco Arcieri.
 
+Nell'ambito della documentazione professionale e contabile dell'autore, il software è classificato come immobilizzazione immateriale strumentale all'attività professionale.
+
+## Autore e licenza
+
+Quaestio è stato ideato, progettato e sviluppato da **Franco Arcieri**.
+
+Il codice sorgente è distribuito secondo i termini della **Apache License 2.0**. Le attribuzioni applicabili sono riportate anche nel file [`NOTICE`](NOTICE).
+
+Copyright © 2022–2026 Franco Arcieri.
+
+## Repository ufficiali
+
+- Quaestio Client: https://github.com/afrrcainecroi/quaestio-client
+- Quaestio Server: https://github.com/afrrcainecroi/quaestio-server
+- Distributed Cooperative Systems Security Framework — DCSSF: https://github.com/afrrcainecroi/dcssf
+
+Il repository del server sarà pubblicato all'indirizzo indicato sopra.
+
+## Architettura
+
+Quaestio Client è un'applicazione Tauri con frontend React/TypeScript e backend Rust. Comunica con Quaestio Server tramite WebSocket e subprotocollo applicativo `mngquest.v1`.
+
+Il nome `mngquest` resta utilizzato esclusivamente come identificatore tecnico del protocollo e della compatibilità con le versioni server esistenti.
+
+Caratteristiche principali:
+
+- persistenza locale SQLite;
 - `journal_mode=WAL`;
 - `synchronous=FULL`;
 - `secure_delete=ON`;
-- schema versionato;
-- risposte locali transazionali;
-- outbox persistente;
-- stessi `request_id` nei retry;
-- ripresa dopo crash;
-- compilazione utilizzabile in stato `OFFLINE`;
-- cache locale del questionario;
-- cancellazione di risposte, outbox e cache dopo l'ACK di submit;
-- checkpoint WAL troncato dopo la consegna.
+- salvataggio transazionale delle risposte;
+- outbox persistente e retry idempotenti;
+- funzionamento local-first e ripresa dopo interruzioni;
+- cache locale temporanea del questionario;
+- riconciliazione delle risposte con il server;
+- eliminazione dei dati della compilazione dopo submit o scadenza;
+- JWT conservato esclusivamente in memoria.
 
-Il JWT resta esclusivamente in memoria. Dopo un riavvio dell'applicazione si
-esegue nuovamente `auth.activate`: il server riprende la compilazione e il
-client sincronizza automaticamente l'outbox.
+## Percorso del database
 
-## Percorso database
+Il percorso predefinito è ottenuto dalla directory dati locale dell'utente.
 
-Predefinito Linux:
+Su Windows:
+
+```text
+%LOCALAPPDATA%\controlled-questionnaire-client\mngquest-v1.sqlite3
+```
+
+Su Linux:
 
 ```text
 ~/.local/share/controlled-questionnaire-client/mngquest-v1.sqlite3
 ```
 
-Override:
+La directory conserva per compatibilità il nome storico `controlled-questionnaire-client`. Potrà essere migrata in una versione successiva senza perdere eventuali compilazioni temporaneamente pendenti.
 
-```bash
-MNGQUEST_SQLITE_FILE=/percorso/mngquest.sqlite3 npm run tauri dev
-```
+È possibile specificare un percorso diverso con la variabile d'ambiente `MNGQUEST_SQLITE_FILE`.
 
-## Prima esecuzione
+## Sviluppo
 
-```bash
+Requisiti principali:
+
+- Node.js e npm;
+- Rust;
+- toolchain Tauri;
+- su Windows, MSVC e Windows SDK.
+
+Avvio:
+
+```text
 npm install
-
-cd src-tauri
-cargo check
-cd ..
-
 npm run tauri dev
 ```
 
-Non serve eseguire preventivamente `cargo build`: `tauri dev` compila il
-backend Rust.
+Endpoint server di sviluppo:
 
-La dipendenza `rusqlite` usa la feature `bundled`, quindi SQLite viene
-compilato insieme al client e non dipende dalla versione installata nel
-sistema.
+```text
+MNGQUEST_WS_URL=ws://192.168.122.1:32456/hws
+```
+
+In PowerShell:
+
+```powershell
+$env:MNGQUEST_WS_URL = "ws://192.168.122.1:32456/hws"
+npm run tauri dev
+```
+
+## Installer Windows
+
+L'installer NSIS è configurato per l'utente corrente e non richiede un'installazione per macchina:
+
+```text
+npm run bundle:windows
+```
+
+Il pacchetto viene generato sotto:
+
+```text
+src-tauri\target\release\bundle\nsis\
+```
 
 ## Semantica local-first
 
 Quando l'utente modifica una risposta:
 
 1. una transazione aggiorna `local_answer`;
-2. nella stessa transazione inserisce l'envelope applicativo in `outbox`;
+2. la stessa transazione inserisce l'envelope applicativo nell'outbox;
 3. soltanto dopo il commit viene tentato l'invio WebSocket;
-4. l'ACK server elimina l'elemento dall'outbox e marca la revisione `SYNCED`.
+4. l'ACK del server elimina l'elemento dall'outbox e marca la revisione `SYNCED`.
 
-Se il processo o la rete si interrompono tra i punti 3 e 4, al successivo
-`auth.activate` l'elemento viene reinviato con lo stesso `request_id` e la
-stessa `client_revision`.
+Se il processo o la rete si interrompono, la richiesta viene ritentata con lo stesso `request_id` e la stessa `client_revision`.
 
-Le revisioni vengono inviate nell'ordine della colonna `sequence`. Al primo
-errore la coda si arresta per non superare una revisione precedente.
+Il submit resta disabilitato finché esistono elementi pendenti o in errore.
 
-## Modalità offline
+## Dati locali dopo il submit
 
-Se il WebSocket cade durante la compilazione:
+Dopo la conferma `SUBMITTED` del server, il client:
 
-```text
-RUNNING → OFFLINE
-```
+- elimina risposte, outbox e questionario in cache;
+- chiude la connessione SQLite;
+- rimuove il database precedente e i file WAL/SHM;
+- ricrea un database minimo con il solo stato finale necessario;
+- elimina il token dalla memoria;
+- esce dalla modalità fullscreen.
 
-Il questionario resta visibile e le nuove risposte continuano a essere
-salvate in SQLite. Per riprendere:
+Una compilazione scaduta viene bonificata automaticamente al successivo avvio.
 
-1. riconnettere il WebSocket;
-2. eseguire nuovamente `auth.activate`;
-3. attendere lo svuotamento dell'outbox.
+## Stato del progetto
 
-Il submit è disabilitato finché esistono elementi pendenti o in errore.
-
-## Migrazione dal checkpoint JSON
-
-Alla prima apertura di un database vuoto, il client cerca il precedente:
-
-```text
-state-v0.5.json
-```
-
-Se valido, importa configurazione, snapshot e risposte in SQLite, quindi lo
-rinomina:
-
-```text
-state-v0.5.json.migrated
-```
-
-## Dopo il submit
-
-Solo dopo l'ACK `SUBMITTED`, una singola transazione salva lo snapshot finale e rimuove:
-
-- risposte locali;
-- outbox;
-- questionario in cache.
-
-Il client esegue inoltre:
-
-```sql
-PRAGMA wal_checkpoint(TRUNCATE);
-PRAGMA incremental_vacuum;
-```
-
-`secure_delete=ON` migliora la cancellazione delle pagine SQLite, ma questa
-versione non cifra ancora il database. Per protezione crittografica at-rest il
-passo successivo sarà SQLCipher o cifratura applicativa con chiave effimera.
-
-
-## Gestione errori outbox
-
-La sincronizzazione automatica non supera mai un elemento in stato `ERROR`,
-per mantenere l'ordine delle revisioni. Il pulsante **Sincronizza outbox**
-rende nuovamente `PENDING` gli elementi in errore e tenta un retry esplicito.
-
-I retry automatici sono distanziati di cinque secondi, evitando un ciclo
-aggressivo in caso di timeout con socket ancora formalmente aperto.
-
-
-Lo snapshot `SUBMITTED` e la cancellazione dei dati locali sono atomici: un
-crash non può lasciare lo stato precedente dopo che le righe sensibili sono
-state eliminate.
-
-
-## Correzione v0.7.1
-
-`AppState::persist()` clona `ClientConfig` e `ClientSnapshot` dai rispettivi
-`RwLock` prima di chiamare SQLite. In questo modo non vengono passati
-`RwLockReadGuard` a `Database::save_state` e i lock non restano detenuti
-durante l'operazione sincrona sul database.
-
-
-## Baseline v0.7.6
-
-Questa è una versione completa e autosufficiente. Integra:
-
-- SQLite WAL e outbox persistente;
-- `AppState::persist()` senza guard `RwLock` passati al database;
-- rilascio dei lock prima di ogni `persist()`;
-- autenticazione non bloccata dalla sincronizzazione outbox;
-- writer WebSocket diretto, senza canale `mpsc`;
-- routing della risposta con rilascio esplicito del mutex `pending`;
-- `request_id` copiato in una `String` prima di spostare il JSON della risposta;
-- diagnostica sicura del trasporto, senza stampa del JWT.
-
-Per preservare la cache Cargo, copiare i sorgenti nella directory di lavoro
-stabile senza eliminare `src-tauri/target`, `node_modules` o `Cargo.lock`.
+La versione `0.7.6` costituisce la baseline Windows iniziale del client Quaestio. Il software è uno strumento di supporto tecnico-didattico e di ricerca e non un prodotto commerciale destinato alla vendita.

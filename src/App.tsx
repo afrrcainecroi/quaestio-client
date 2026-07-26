@@ -379,9 +379,9 @@ export default function App() {
   return (
     <main className="layout">
       <header>
-        <p className="eyebrow">MNGQUEST</p>
+        <p className="eyebrow">QUAESTIO</p>
         <h1>
-          Controlled Questionnaire Client v0.7.0
+          Quaestio Client v0.7.6
         </h1>
         <p>
           SQLite WAL, outbox persistente e funzionamento
