@@ -1,6 +1,6 @@
 [package]
 name = "controlled-questionnaire-client"
-version = "0.7.1"
+version = "0.7.6"
 description = "Client controllato per questionari online"
 authors = ["Franco Arcieri"]
 edition = "2021"
