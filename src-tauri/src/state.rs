@@ -2,7 +2,10 @@ use std::{
     collections::{BTreeMap, HashMap},
     fs,
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 use chrono::{DateTime, Utc};
@@ -35,6 +38,8 @@ pub struct AppState {
     pub answers: Arc<RwLock<BTreeMap<String, LocalAnswer>>>,
     pub ws_writer: Arc<Mutex<Option<WebSocketWriter>>>,
     pub pending: Arc<Mutex<HashMap<String, PendingReply>>>,
+    pub auto_reconnect_enabled: Arc<AtomicBool>,
+    pub reconnect_running: Arc<AtomicBool>,
     pub db: Database,
 }
 
@@ -98,6 +103,8 @@ impl AppState {
             answers: Arc::new(RwLock::new(answers)),
             ws_writer: Arc::new(Mutex::new(None)),
             pending: Arc::new(Mutex::new(HashMap::new())),
+            auto_reconnect_enabled: Arc::new(AtomicBool::new(true)),
+            reconnect_running: Arc::new(AtomicBool::new(false)),
             db: database,
         })
     }
@@ -116,6 +123,33 @@ impl AppState {
         let answers = self.db.load_answers(&compilation_id)?;
         *self.answers.write().await = answers;
         Ok(())
+    }
+
+    pub fn enable_auto_reconnect(&self) {
+        self.auto_reconnect_enabled.store(true, Ordering::SeqCst);
+    }
+
+    pub fn disable_auto_reconnect(&self) {
+        self.auto_reconnect_enabled.store(false, Ordering::SeqCst);
+    }
+
+    pub fn auto_reconnect_is_enabled(&self) -> bool {
+        self.auto_reconnect_enabled.load(Ordering::SeqCst)
+    }
+
+    pub async fn clear_expired_attempt(&self) -> Result<bool, AppError> {
+        let current = self.snapshot.read().await.clone();
+        if !attempt_is_expired(&current) {
+            return Ok(false);
+        }
+
+        let config = self.config.read().await.clone();
+        let snapshot = ClientSnapshot::from_config(&config);
+        self.db.recreate_with_state(&config, &snapshot)?;
+        *self.snapshot.write().await = snapshot;
+        self.answers.write().await.clear();
+        *self.access_token.write().await = None;
+        Ok(true)
     }
 }
 
@@ -169,7 +203,7 @@ fn read_default_token() -> Option<String> {
     (!token.is_empty()).then_some(token)
 }
 
-fn attempt_is_expired(snapshot: &ClientSnapshot) -> bool {
+pub(crate) fn attempt_is_expired(snapshot: &ClientSnapshot) -> bool {
     if snapshot.state == ClientState::Submitted {
         return false;
     }

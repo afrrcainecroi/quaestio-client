@@ -1,9 +1,12 @@
-use std::time::Duration;
+﻿use std::{
+    sync::atomic::Ordering,
+    time::Duration,
+};
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{
@@ -19,6 +22,15 @@ const SUBPROTOCOL: &str = "mngquest.v1";
 
 pub async fn connect(app: AppHandle, url: String) -> Result<(), AppError> {
     let state = app.state::<AppState>().inner().clone();
+    state.enable_auto_reconnect();
+    connect_transport(app, state, url).await
+}
+
+async fn connect_transport(
+    app: AppHandle,
+    state: AppState,
+    url: String,
+) -> Result<(), AppError> {
     if state.ws_writer.lock().await.is_some() {
         return Ok(());
     }
@@ -59,10 +71,16 @@ pub async fn connect(app: AppHandle, url: String) -> Result<(), AppError> {
     let (writer, mut reader) = stream.split();
     *state.ws_writer.lock().await = Some(writer);
 
+    let token_loaded = state.access_token.read().await.is_some();
     {
         let mut snapshot = state.snapshot.write().await;
+        let previous_state = snapshot.state.clone();
         snapshot.websocket_connected = true;
-        snapshot.state = ClientState::Connected;
+        snapshot.state = match previous_state {
+            ClientState::Offline if token_loaded => ClientState::Running,
+            ClientState::Submitted => ClientState::Submitted,
+            _ => ClientState::Connected,
+        };
         snapshot.last_error = None;
     }
     state.persist().await?;
@@ -150,12 +168,15 @@ pub async fn connect(app: AppHandle, url: String) -> Result<(), AppError> {
                 "reason": disconnect_reason
             }),
         );
+
+        schedule_reconnect(task_app, task_state);
     });
 
     Ok(())
 }
 
 pub async fn disconnect(state: &AppState) -> Result<(), AppError> {
+    state.disable_auto_reconnect();
     let writer = state.ws_writer.lock().await.take();
 
     if let Some(mut writer) = writer {
@@ -163,6 +184,117 @@ pub async fn disconnect(state: &AppState) -> Result<(), AppError> {
     }
 
     Ok(())
+}
+
+fn schedule_reconnect(app: AppHandle, state: AppState) {
+    if !state.auto_reconnect_is_enabled() {
+        return;
+    }
+
+    if state
+        .reconnect_running
+        .swap(true, Ordering::SeqCst)
+    {
+        return;
+    }
+
+    tauri::async_runtime::spawn(async move {
+        let mut attempt = 0_u32;
+
+        loop {
+            if !state.auto_reconnect_is_enabled() {
+                break;
+            }
+
+            match state.clear_expired_attempt().await {
+                Ok(true) => {
+                    let _ = app.emit(
+                        "transport-status",
+                        serde_json::json!({
+                            "connected": false,
+                            "expired": true,
+                            "reason": "compilazione scaduta durante il periodo offline"
+                        }),
+                    );
+                    break;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    state.snapshot.write().await.last_error =
+                        Some(error.to_string());
+                    let _ = state.persist().await;
+                    break;
+                }
+            }
+
+            let snapshot = state.snapshot.read().await.clone();
+            if snapshot.state == ClientState::Submitted {
+                break;
+            }
+
+            if snapshot.state != ClientState::Offline
+                || state.access_token.read().await.is_none()
+            {
+                break;
+            }
+
+            attempt = attempt.saturating_add(1);
+            let delay_seconds = match attempt {
+                1 => 1,
+                2 => 2,
+                3 => 4,
+                4 => 8,
+                5 => 15,
+                _ => 30,
+            };
+
+            let _ = app.emit(
+                "transport-status",
+                serde_json::json!({
+                    "connected": false,
+                    "reconnecting": true,
+                    "attempt": attempt,
+                    "delaySeconds": delay_seconds
+                }),
+            );
+
+            sleep(Duration::from_secs(delay_seconds)).await;
+
+            if !state.auto_reconnect_is_enabled() {
+                break;
+            }
+
+            let url = state.config.read().await.server_url.clone();
+            match connect_transport(app.clone(), state.clone(), url).await {
+                Ok(()) => {
+                    let _ = app.emit(
+                        "transport-status",
+                        serde_json::json!({
+                            "connected": true,
+                            "reconnected": true,
+                            "attempt": attempt
+                        }),
+                    );
+                    break;
+                }
+                Err(error) => {
+                    {
+                        let mut snapshot = state.snapshot.write().await;
+                        snapshot.websocket_connected = false;
+                        snapshot.state = ClientState::Offline;
+                        snapshot.last_error = Some(format!(
+                            "riconnessione WebSocket fallita: {error}"
+                        ));
+                    }
+                    let _ = state.persist().await;
+                }
+            }
+        }
+
+        state
+            .reconnect_running
+            .store(false, Ordering::SeqCst);
+    });
 }
 
 pub async fn request(
@@ -360,3 +492,4 @@ async fn drain_pending(state: &AppState, reason: &str) {
         let _ = reply.send(Err(reason.to_string()));
     }
 }
+
